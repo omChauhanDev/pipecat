@@ -478,6 +478,7 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
         # Thought signatures are already in message order.
         thought_signatures_applied = 0
         message_start_index = 0  # Track where to start searching for the next matching message.
+        last_function_call_signature = None
         for thought_signature_dict in thought_signature_dicts:
             signature = thought_signature_dict.get("signature")
             bookmark = thought_signature_dict.get("bookmark")
@@ -499,12 +500,48 @@ class GeminiLLMAdapter(BaseLLMAdapter[GeminiLLMInvocationParams]):
                     last_part.thought_signature = signature
                     thought_signatures_applied += 1
 
+                    if bookmark.get("function_call"):
+                        last_function_call_signature = signature
+
                     # Update the start index and stop searching for a match
                     message_start_index = i + 1
                     break
 
+        thought_signatures_applied += self._propagate_function_call_signature(
+            assistant_messages, last_function_call_signature
+        )
+
         # For debugging, print out how many thought signatures were applied
         logger.debug(f"Applied {thought_signatures_applied} thought signatures.")
+
+    def _propagate_function_call_signature(
+        self, assistant_messages: List[Content], signature: Optional[str]
+    ) -> int:
+        """Propagate a thought signature to function calls that are missing one.
+
+        Args:
+            assistant_messages: List of assistant messages to process.
+            signature: The thought signature to propagate, typically from the last
+                function call in a multi-call response.
+
+        Returns:
+            Number of signatures applied during propagation.
+        """
+        if not signature:
+            return 0
+
+        signatures_applied = 0
+        for message in assistant_messages:
+            for part in message.parts:
+                if (
+                    hasattr(part, "function_call")
+                    and part.function_call
+                    and not getattr(part, "thought_signature", None)
+                ):
+                    part.thought_signature = signature
+                    signatures_applied += 1
+
+        return signatures_applied
 
     def _thought_signature_bookmark_matches_part(self, bookmark: dict, part: Part) -> bool:
         if function_call_bookmark := bookmark.get("function_call"):
