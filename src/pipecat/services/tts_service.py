@@ -1029,6 +1029,11 @@ class TTSService(AIService):
         # must resume here to prevent a permanent deadlock.
         await self._maybe_resume_frame_processing()
 
+        # Release the pause here too: a mid-TTFB interruption produces no audio,
+        # so the `BotStoppedSpeakingFrame` that would normally resume us never
+        # arrives.
+        await self._maybe_resume_frame_processing()
+
     async def _maybe_pause_frame_processing(self):
         if self._processing_text and self._pause_frame_processing:
             await self.pause_processing_frames()
