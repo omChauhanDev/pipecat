@@ -7,6 +7,8 @@
 import asyncio
 import unittest
 
+from loguru import logger
+
 from pipecat.bus import (
     AsyncQueueBus,
     BusJobCancelMessage,
@@ -23,6 +25,7 @@ from pipecat.pipeline.job_context import (
     JobParams,
     JobStatus,
 )
+from pipecat.pipeline.job_decorator import job
 from pipecat.registry import WorkerRegistry
 from pipecat.registry.types import WorkerReadyData
 from pipecat.utils.asyncio.task_manager import TaskManager
@@ -778,6 +781,160 @@ class TestJobContext(unittest.IsolatedAsyncioTestCase):
         response_msgs = [m for m in sent if isinstance(m, BusJobResponseMessage)]
         self.assertEqual(len(response_msgs), 1)
         self.assertEqual(response_msgs[0].status, JobStatus.CANCELLED)
+
+
+class TestJobHandlerException(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.bus, self.tm, self.registry = await create_test_env()
+
+    async def asyncTearDown(self):
+        await self.bus.stop()
+
+    async def _wait_until(self, predicate, timeout=2.0):
+        deadline = asyncio.get_event_loop().time() + timeout
+        while not predicate():
+            if asyncio.get_event_loop().time() > deadline:
+                raise AssertionError("condition not met within timeout")
+            await asyncio.sleep(0.01)
+
+    def _capture_errors(self) -> list[str]:
+        """Collect ERROR-level log messages for the duration of a test."""
+        messages: list[str] = []
+        handler_id = logger.add(messages.append, level="ERROR", format="{message}")
+        self.addCleanup(logger.remove, handler_id)
+        return messages
+
+    async def test_job_handler_exception_reports_error(self):
+        """A @job handler that raises settles its job as ERROR."""
+        sent = capture_bus(self.bus)
+
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        class BrokenWorker(BaseWorker):
+            @job(name="work")
+            async def on_work(self, message):
+                raise RuntimeError("handler bug")
+
+        worker = BrokenWorker("worker")
+        await setup_task(self.bus, self.registry, worker)
+
+        async def run_job():
+            async with parent.job("worker", params=JobParams(name="work")):
+                pass
+
+        with self.assertRaises(JobError):
+            await asyncio.wait_for(run_job(), timeout=2.0)
+
+        response_msgs = [m for m in sent if isinstance(m, BusJobResponseMessage)]
+        self.assertEqual(len(response_msgs), 1)
+        self.assertEqual(response_msgs[0].status, JobStatus.ERROR)
+        self.assertIsNone(response_msgs[0].response)
+        self.assertEqual(worker.active_jobs, {})
+
+    async def test_on_job_request_exception_reports_error(self):
+        """An on_job_request override that raises settles its job the same way."""
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        class BrokenWorker(BaseWorker):
+            async def on_job_request(self, message):
+                raise RuntimeError("handler bug")
+
+        worker = BrokenWorker("worker")
+        await setup_task(self.bus, self.registry, worker)
+
+        async def run_job():
+            async with parent.job("worker"):
+                pass
+
+        with self.assertRaises(JobError):
+            await asyncio.wait_for(run_job(), timeout=2.0)
+
+        self.assertEqual(worker.active_jobs, {})
+
+    async def test_exception_after_streaming_starts_reports_error(self):
+        """A handler that raises mid-stream settles its job as ERROR."""
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        class BrokenWorker(BaseWorker):
+            @job(name="work")
+            async def on_work(self, message):
+                await self.send_job_stream_start(message.job_id)
+                await self.send_job_stream_data(message.job_id, {"chunk": 1})
+                raise RuntimeError("handler bug")
+
+        worker = BrokenWorker("worker")
+        await setup_task(self.bus, self.registry, worker)
+
+        async def run_job():
+            async with parent.job("worker", params=JobParams(name="work")):
+                pass
+
+        with self.assertRaises(JobError):
+            await asyncio.wait_for(run_job(), timeout=2.0)
+
+        self.assertEqual(worker.active_jobs, {})
+
+    async def test_exception_after_responding_does_not_respond_again(self):
+        """A handler that responds and then raises leaves its response alone."""
+        sent = capture_bus(self.bus)
+        errors = self._capture_errors()
+
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        class BrokenWorker(BaseWorker):
+            @job(name="work")
+            async def on_work(self, message):
+                await self.send_job_response(message.job_id, {"answer": 1})
+                raise RuntimeError("handler bug")
+
+        worker = BrokenWorker("worker")
+        await setup_task(self.bus, self.registry, worker)
+
+        async with parent.job("worker", params=JobParams(name="work")) as t:
+            pass
+
+        self.assertEqual(t.response, {"answer": 1})
+        await self._wait_until(lambda: not worker._job_handler_tasks)
+
+        response_msgs = [m for m in sent if isinstance(m, BusJobResponseMessage)]
+        self.assertEqual(len(response_msgs), 1)
+        self.assertEqual(response_msgs[0].status, JobStatus.COMPLETED)
+        # The handler's own exception is the only error: responding to a job
+        # that is no longer active would log a second one.
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("handler raised", errors[0])
+
+    async def test_exception_after_stream_end_does_not_respond_again(self):
+        """A handler that ends its stream and then raises leaves the job settled."""
+        sent = capture_bus(self.bus)
+        errors = self._capture_errors()
+
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        class BrokenWorker(BaseWorker):
+            @job(name="work")
+            async def on_work(self, message):
+                await self.send_job_stream_start(message.job_id)
+                await self.send_job_stream_end(message.job_id, {"done": True})
+                raise RuntimeError("handler bug")
+
+        worker = BrokenWorker("worker")
+        await setup_task(self.bus, self.registry, worker)
+
+        async with parent.job("worker", params=JobParams(name="work")):
+            pass
+
+        await self._wait_until(lambda: not worker._job_handler_tasks)
+
+        self.assertEqual([m for m in sent if isinstance(m, BusJobResponseMessage)], [])
+        self.assertEqual(worker.active_jobs, {})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("handler raised", errors[0])
 
 
 if __name__ == "__main__":

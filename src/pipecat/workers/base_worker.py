@@ -563,7 +563,9 @@ class BaseWorker(BaseObject, BusSubscriber):
         """Called when this worker receives a job request.
 
         Override to perform work. Use ``send_job_update()`` to report
-        progress and ``send_job_response()`` to return results.
+        progress and ``send_job_response()`` to return results. An
+        exception that escapes the handler is reported to the requester
+        as ``JobStatus.ERROR``.
         """
         pass
 
@@ -1417,6 +1419,14 @@ class BaseWorker(BaseObject, BusSubscriber):
                 await handler(message)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception(
+                f"Worker '{self}': job '{message.job_name or 'default'}' handler raised"
+            )
+            # A handler that already responded, or ended its stream, is no
+            # longer active; only one that abandoned its job is settled here.
+            if job_id in self._active_jobs:
+                await self.send_job_response(job_id, status=JobStatus.ERROR)
         finally:
             self._job_handler_tasks.pop(job_id, None)
 

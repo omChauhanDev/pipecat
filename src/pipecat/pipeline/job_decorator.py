@@ -15,7 +15,8 @@ def job(*, name: str, sequential: bool = False):
     Decorated methods are automatically collected by ``BaseWorker`` at
     initialization and dispatched when matching job requests arrive.
     Each request runs in its own asyncio task so the bus message loop
-    is never blocked.
+    is never blocked. An exception that escapes the handler is reported
+    to the requester as ``JobStatus.ERROR``.
 
     Example::
 
