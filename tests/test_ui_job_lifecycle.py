@@ -327,7 +327,7 @@ def _stub_job_group(worker, job_id="t1", worker_names=("w1",)):
     async def _ready(names):
         fut = asyncio.get_running_loop().create_future()
         fut.set_result(True)
-        return fut
+        return fut, []
 
     async def _send(worker_name, jid, job_name=None, payload=None):
         pass

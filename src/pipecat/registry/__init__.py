@@ -6,8 +6,9 @@
 
 """Worker registry for tracking known workers across runners."""
 
-from pipecat.registry.registry import WorkerRegistry
+from pipecat.registry.registry import WatchHandler, WorkerRegistry
 
 __all__ = [
+    "WatchHandler",
     "WorkerRegistry",
 ]

@@ -60,7 +60,7 @@ from pipecat.pipeline.job_context import (
 )
 from pipecat.pipeline.job_decorator import _collect_job_handlers
 from pipecat.pipeline.worker_ready_decorator import _collect_worker_ready_handlers
-from pipecat.registry import WorkerRegistry
+from pipecat.registry import WatchHandler, WorkerRegistry
 from pipecat.registry.types import WorkerErrorData, WorkerReadyData
 from pipecat.utils.asyncio.task_manager import BaseTaskManager
 from pipecat.utils.base_object import BaseObject
@@ -1092,11 +1092,14 @@ class BaseWorker(BaseObject, BusSubscriber):
             timeout=timeout,
             cancel_on_error=cancel_on_error,
         )
-        all_ready = await self._wait_workers_ready(worker_names)
+        all_ready, watches = await self._wait_workers_ready(worker_names)
         try:
             await asyncio.wait_for(all_ready, timeout=group_params.timeout)
         except TimeoutError:
             raise JobGroupError("workers not ready within timeout")
+        finally:
+            for watched_name, handler in watches:
+                self.registry.unwatch(watched_name, handler)
 
         group = self._create_job_group(worker_names, params=group_params)
 
@@ -1538,11 +1541,18 @@ class BaseWorker(BaseObject, BusSubscriber):
 
         return group
 
-    async def _wait_workers_ready(self, worker_names: list[str]) -> asyncio.Future:
+    async def _wait_workers_ready(
+        self, worker_names: list[str]
+    ) -> tuple[asyncio.Future, list[tuple[str, WatchHandler]]]:
         """Return a future that resolves when all named workers are ready.
 
         Callers can race the returned future against a timeout or group
-        done signal.
+        done signal, and must unwatch the returned handlers once the wait
+        is over, whether or not the workers became ready.
+
+        Returns:
+            The future, and the ``(worker_name, handler)`` pairs registered
+            with the registry.
 
         Raises:
             RuntimeError: If the registry is not available.
@@ -1551,6 +1561,7 @@ class BaseWorker(BaseObject, BusSubscriber):
             raise RuntimeError(f"Worker '{self}': registry not available")
 
         ready_events: dict[str, asyncio.Event] = {}
+        watches: list[tuple[str, WatchHandler]] = []
         for name in worker_names:
             event = asyncio.Event()
             ready_events[name] = event
@@ -1558,9 +1569,13 @@ class BaseWorker(BaseObject, BusSubscriber):
             async def _on_ready(data, ev=event):
                 ev.set()
 
+            watches.append((name, _on_ready))
             await self._registry.watch(name, _on_ready)
 
-        return asyncio.ensure_future(asyncio.gather(*(ev.wait() for ev in ready_events.values())))
+        all_ready = asyncio.ensure_future(
+            asyncio.gather(*(ev.wait() for ev in ready_events.values()))
+        )
+        return all_ready, watches
 
     async def _send_job_request(
         self,

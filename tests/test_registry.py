@@ -100,6 +100,54 @@ class TestTaskRegistry(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(received), 1)
 
+    async def test_unwatch_stops_the_handler_firing(self):
+        """An unwatched handler does not fire when the worker registers."""
+        received = []
+
+        async def handler(task_data):
+            received.append(task_data)
+
+        await self.registry.watch("greeter", handler)
+        self.registry.unwatch("greeter", handler)
+
+        data = WorkerReadyData(worker_name="greeter", runner="runner_a")
+        await self.registry.register(data)
+
+        self.assertEqual(received, [])
+
+    async def test_unwatch_leaves_the_other_handlers_alone(self):
+        """Unwatching one handler does not disturb the others."""
+        received_a = []
+        received_b = []
+
+        async def handler_a(task_data):
+            received_a.append(task_data)
+
+        async def handler_b(task_data):
+            received_b.append(task_data)
+
+        await self.registry.watch("greeter", handler_a)
+        await self.registry.watch("greeter", handler_b)
+        self.registry.unwatch("greeter", handler_a)
+
+        data = WorkerReadyData(worker_name="greeter", runner="runner_a")
+        await self.registry.register(data)
+
+        self.assertEqual(received_a, [])
+        self.assertEqual(len(received_b), 1)
+
+    async def test_unwatch_is_a_no_op_when_nothing_is_watched(self):
+        """Unwatching an unknown worker or an unregistered handler does not raise."""
+
+        async def handler(task_data):
+            pass
+
+        self.registry.unwatch("nobody", handler)
+
+        await self.registry.watch("greeter", handler)
+        self.registry.unwatch("greeter", handler)
+        self.registry.unwatch("greeter", handler)
+
     async def test_watch_does_not_fire_for_other_tasks(self):
         """Watch handler does not fire for a different task."""
         received = []

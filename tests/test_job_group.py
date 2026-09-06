@@ -227,6 +227,33 @@ class TestJobGroupContext(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("not ready", str(ctx.exception))
 
+    async def test_ready_watches_are_removed_after_the_workers_are_ready(self):
+        """The ready-wait removes its handlers, so repeated groups do not accumulate them."""
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        worker = JobWorkerTask("worker", response={"ok": True})
+        await setup_task(self.bus, self.registry, worker)
+
+        for _ in range(3):
+            async with parent.job_group("worker"):
+                pass
+
+        self.assertEqual(self.registry._watches.get("worker", []), [])
+
+    async def test_ready_watches_are_removed_after_a_ready_timeout(self):
+        """A ready-wait that times out removes its handlers too."""
+        parent = StubTask("parent")
+        await setup_task(self.bus, self.registry, parent)
+
+        # "ghost" is never registered, so every ready-wait here times out.
+        for _ in range(3):
+            with self.assertRaises(JobGroupError):
+                async with parent.job_group("ghost", params=JobGroupParams(timeout=0.05)):
+                    pass
+
+        self.assertEqual(self.registry._watches.get("ghost", []), [])
+
     async def test_job_group_cancels_on_block_exception(self):
         """job_group() cancels remaining jobs when the block raises."""
         sent = capture_bus(self.bus)
