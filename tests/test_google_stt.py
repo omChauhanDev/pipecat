@@ -82,6 +82,52 @@ async def test_google_final_result_emits_finalized_transcription_frame():
     assert transcriptions == [("hello", True, "en-US")]
 
 
+@pytest.mark.asyncio
+async def test_google_streaming_limit_settles_the_response_it_already_received():
+    """A final transcript landing on the streaming-limit boundary is not dropped.
+
+    The limit is checked after the response is handled, so the response Google has
+    already delivered still reaches the pipeline, and the loop still stops so the
+    caller can reconnect.
+    """
+    service = object.__new__(GoogleSTTService)
+    # Opened longer ago than the limit, so the boundary check fires on the first
+    # response rather than after some elapsed wall-clock time.
+    service._stream_start_time = int(time.time() * 1000) - (GoogleSTTService.STREAMING_LIMIT + 1000)
+    service._user_id = "user"
+    service._last_transcript_was_final = False
+    service._get_language_codes = lambda: ["en-US"]
+    service._stt_usage_pending_seconds = 0.0
+    service._setup = frame_processor_setup(TaskManager(), enable_usage_metrics=False)
+
+    frames = []
+    transcriptions = []
+
+    async def push_frame(frame):
+        frames.append(frame)
+
+    async def handle_transcription(transcript, is_final, language=None):
+        transcriptions.append((transcript, is_final, language))
+
+    service.push_frame = push_frame
+    service._handle_transcription = handle_transcription
+
+    responses = AsyncResponses(
+        [
+            SimpleNamespace(results=[result(transcript="on the boundary", is_final=True)]),
+            SimpleNamespace(results=[result(transcript="after the break", is_final=True)]),
+        ]
+    )
+
+    await service._process_responses(responses)
+
+    # The response already delivered is settled.
+    assert [f.text for f in frames if isinstance(f, TranscriptionFrame)] == ["on the boundary"]
+    assert transcriptions == [("on the boundary", True, "en-US")]
+    # And the loop still stopped, so the caller reconnects instead of reading on.
+    assert len(frames) == 1
+
+
 def test_normalize_speech_adaptation_accepts_native_message():
     adaptation = cloud_speech.SpeechAdaptation()
 

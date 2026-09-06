@@ -1117,14 +1117,6 @@ class GoogleSTTService(STTService):
         """Process streaming recognition responses."""
         try:
             async for response in streaming_recognize:
-                # Check streaming limit
-                if (int(time.time() * 1000) - self._stream_start_time) > self.STREAMING_LIMIT:
-                    logger.debug("Stream timeout reached in response processing")
-                    break
-
-                if not response.results:
-                    continue
-
                 for result in response.results:
                     if not result.alternatives:
                         continue
@@ -1168,6 +1160,13 @@ class GoogleSTTService(STTService):
                                 result=result,
                             )
                         )
+
+                # Google has already delivered this response, so settle it before
+                # deciding to stop. Checking the limit first discarded whatever
+                # landed on the boundary, including a final transcript.
+                if (int(time.time() * 1000) - self._stream_start_time) > self.STREAMING_LIMIT:
+                    logger.debug("Stream timeout reached in response processing")
+                    break
         except Aborted:
             # Handle stream abort due to inactivity (409 error).
             # This occurs when no audio is sent to the stream for 10+ seconds,
