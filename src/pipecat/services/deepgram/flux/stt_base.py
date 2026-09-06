@@ -636,10 +636,20 @@ class DeepgramFluxSTTBase(STTService):
             return changed
 
         configure_fields = changed.keys() & self._CONFIGURE_FIELDS
-        if configure_fields and self._transport_is_active():
-            await self._send_configure(configure_fields)
+        needs_reconnect = bool(changed.keys() & self._CONNECTION_FIELDS)
 
-        if changed.keys() & self._CONNECTION_FIELDS:
+        if configure_fields:
+            if self._transport_is_active():
+                await self._send_configure(configure_fields)
+            else:
+                # There is no connection to send a Configure over. Flux reads
+                # every configure-able field from the connection URL as well, so
+                # reconnecting is what applies them. Without this the update is
+                # dropped while the base class has already marked the service
+                # usable again.
+                needs_reconnect = True
+
+        if needs_reconnect:
             await self._request_reconnect()
 
         self._warn_unhandled_updated_settings(

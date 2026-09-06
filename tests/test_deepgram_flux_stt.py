@@ -254,6 +254,37 @@ async def test_update_settings_configures_without_reconnecting():
 
 
 @pytest.mark.asyncio
+async def test_update_settings_reconnects_when_there_is_no_live_connection():
+    """A configure-able field still takes effect when the connection is down.
+
+    Flux reads every configure-able field from the connection URL as well as
+    from a Configure message, so with no socket to configure over a reconnect is
+    the only thing that applies the new value. Without it the update is dropped
+    while the base class has already called ``set_usable(True)``, leaving the
+    service reporting healthy while audio goes nowhere.
+    """
+    service = _make_fake_flux_service()
+    service._active = False
+
+    await service._update_settings(DeepgramFluxSTTSettings(eot_threshold=0.9))
+
+    assert service.sent_messages == []
+    assert service.reconnect_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_update_settings_reconnects_once_for_both_kinds_of_field():
+    """A connection field and a configure field together still reconnect once."""
+    service = _make_fake_flux_service()
+    service._active = False
+
+    await service._update_settings(DeepgramFluxSTTSettings(numerals=True, eot_threshold=0.9))
+
+    assert service.sent_messages == []
+    assert service.reconnect_requests == 1
+
+
+@pytest.mark.asyncio
 async def test_fatal_error_reports_code_and_description():
     """A FatalError raises with the code and description Flux sends."""
     service = _make_fake_flux_service()
